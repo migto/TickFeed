@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package tornadofeed;
+
+message RcvReport {
+    uint32 cb_size = 1;
+    uint32 time = 2;
+    uint32 market = 3;
+    bytes label = 4;
+    bytes name = 5;
+
+    float last_close = 6;
+    float open = 7;
+    float high = 8;
+    float low = 9;
+    float new_price = 10;
+    float volume = 11;
+    float amount = 12;
+
+    float buy_price_1 = 13;
+    float buy_price_2 = 14;
+    float buy_price_3 = 15;
+    float buy_price_4 = 16;
+    float buy_price_5 = 17;
+    float buy_volume_1 = 18;
+    float buy_volume_2 = 19;
+    float buy_volume_3 = 20;
+    float buy_volume_4 = 21;
+    float buy_volume_5 = 22;
+
+    float sell_price_1 = 23;
+    float sell_price_2 = 24;
+    float sell_price_3 = 25;
+    float sell_price_4 = 26;
+    float sell_price_5 = 27;
+    float sell_volume_1 = 28;
+    float sell_volume_2 = 29;
+    float sell_volume_3 = 30;
+    float sell_volume_4 = 31;
+    float sell_volume_5 = 32;
+}
+
+message RcvData {
+    repeated RcvReport lstReport = 1;
+}
