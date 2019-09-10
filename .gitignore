@@ -1,0 +1,17 @@
+# Python
+*.pyc
+*/_pycache__
+
+# Jupyter
+.ipynb_checkpoints
+
+# IDE
+.vscode
+
+# Mac
+.DS_Store
+
+# Folder
+/data/
+/util/
+
