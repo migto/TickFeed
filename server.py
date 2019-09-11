@@ -18,6 +18,16 @@ from google.protobuf.json_format import MessageToJson
 from lib.websocket_server import WebsocketServer
 from lib.rcvdata_pb2 import RcvData
 
+MQ_CONFIG = {
+    "host": "192.168.91.130",
+    "port": 5672,
+    "vhost": "/",
+    "user": "guest",
+    "passwd": "guest",
+    "exchange": "amq.fanout",
+    "routingkey": "queue"
+}
+
 @unique
 class Mode(Enum):
     """This class defines the server modes:
@@ -44,12 +54,83 @@ class StoppableThread(threading.Thread):
         self._chunk_size = 1000
         self._server = server
 
+        lst = self._channel.split('-')
+        if len(lst) != 2:
+            print('Unrecognized channel {}'.format(self._channel))
+        self._symbol = lst[1]
+
+        # if Mode is live, initialize amqp connection to rabbitmq
+        self._amqp_channel = None
+        self._amqp_connection = None
+        if self._mode is Mode.live:
+            self._amqp_credentials = pika.PlainCredentials(MQ_CONFIG.get("user"), MQ_CONFIG.get("passwd"))
+            self._amqp_parameters = pika.ConnectionParameters(MQ_CONFIG.get("host"), MQ_CONFIG.get("port"),\
+                                           MQ_CONFIG.get("vhost"), self._amqp_credentials)
+            self._amqp_connection = pika.BlockingConnection(self._amqp_parameters)
+            self._amqp_channel = self._amqp_connection.channel()
+            result = self._amqp_channel.queue_declare(queue='', exclusive=True)
+            self._amqp_channel.queue_bind(exchange=MQ_CONFIG.get("exchange"),
+                       queue=result.method.queue)
+            self._amqp_channel.basic_consume(queue=result.method.queue,
+                                        auto_ack=True,
+                                        on_message_callback=self.callback)
+
+    def send_report(self, report):
+        """This method sends out the report structure to vnpy trader
+        do the format transform thing"""
+        dic = MessageToDict(report)
+        dic['symbol'] = base64.b64decode(dic['label'])\
+                             .decode('gbk')
+        dic['name'] = base64.b64decode(dic['name'])\
+                            .decode('gbk')
+        dic['time'] = datetime.fromtimestamp(dic['time'])\
+                              .strftime("%Y-%m-%d %H:%M:%S")
+        dic['pre_close'] = float('%.2f' % dic.pop('lastClose'))
+        dic['open_price'] = float('%.2f' % dic.pop('open'))
+        dic['high_price'] = float('%.2f' % dic.pop('high'))
+        dic['low_price'] = float('%.2f' % dic.pop('low'))
+        dic['last_price'] = float('%.2f' % dic.pop('newPrice'))
+        dic['open_interest'] = float('%.2f' % dic.pop('amount'))
+        dic['volume'] = float('%.2f' % dic.pop('volume'))
+
+        dic['b1_p'] = float('%.2f' % dic.pop('buyPrice1'))
+        dic['b2_p'] = float('%.2f' % dic.pop('buyPrice2'))
+        dic['b3_p'] = float('%.2f' % dic.pop('buyPrice3'))
+        dic['b4_p'] = float('%.2f' % dic.pop('buyPrice4'))
+        dic['b5_p'] = float('%.2f' % dic.pop('buyPrice5'))
+        dic['b1_v'] = float('%.2f' % dic.pop('buyVolume1'))
+        dic['b2_v'] = float('%.2f' % dic.pop('buyVolume2'))
+        dic['b3_v'] = float('%.2f' % dic.pop('buyVolume3'))
+        dic['b4_v'] = float('%.2f' % dic.pop('buyVolume4'))
+        dic['b5_v'] = float('%.2f' % dic.pop('buyVolume5'))
+        dic['a1_p'] = float('%.2f' % dic.pop('sellPrice1'))
+        dic['a2_p'] = float('%.2f' % dic.pop('sellPrice2'))
+        dic['a3_p'] = float('%.2f' % dic.pop('sellPrice3'))
+        dic['a4_p'] = float('%.2f' % dic.pop('sellPrice4'))
+        dic['a5_p'] = float('%.2f' % dic.pop('sellPrice5'))
+        dic['a1_v'] = float('%.2f' % dic.pop('sellVolume1'))
+        dic['a2_v'] = float('%.2f' % dic.pop('sellVolume2'))
+        dic['a3_v'] = float('%.2f' % dic.pop('sellVolume3'))
+        dic['a4_v'] = float('%.2f' % dic.pop('sellVolume4'))
+        dic['a5_v'] = float('%.2f' % dic.pop('sellVolume5'))
+        message = '{"table":"' + self._channel +\
+             '","data":' + json.dumps(dic) + '}'
+        print(message)
+        self._server.send_message(self._client, message)
+
+    def callback(self, ch, method, proerties, body):
+        """This method is the amqp consuming callback method
+        parse the data and send the report matches thread
+        symbol
+        """
+        self._rcv_data.ParseFromString(body)
+        for report in self._rcv_data.lstReport:
+            label = report.label.decode('gbk')
+            if label == self._symbol:
+                self.send_report(report)
+
     def run(self):
         try:
-            lst = self._channel.split('-')
-            if len(lst) != 2:
-                print('Unrecognized channel {}, quit'.format(self._channel))
-                return
             if self._mode is Mode.dataframe:
                 reader = pd.read_csv(self._file, iterator=True)
                 loop = True
@@ -84,47 +165,12 @@ class StoppableThread(threading.Thread):
                         self._rcv_data.ParseFromString(msg_data)
                         for report in self._rcv_data.lstReport:
                             label = report.label.decode('gbk')
-                            if label == lst[1]:
-                                dic = MessageToDict(report)
-                                dic['symbol'] = base64.b64decode(dic['label'])\
-                                                     .decode('gbk')
-                                dic['name'] = base64.b64decode(dic['name'])\
-                                                    .decode('gbk')
-                                dic['time'] = datetime.fromtimestamp(dic['time'])\
-                                                      .strftime("%Y-%m-%d %H:%M:%S")
-                                dic['pre_close'] = float('%.2f' % dic.pop('lastClose'))
-                                dic['open_price'] = float('%.2f' % dic.pop('open'))
-                                dic['high_price'] = float('%.2f' % dic.pop('high'))
-                                dic['low_price'] = float('%.2f' % dic.pop('low'))
-                                dic['last_price'] = float('%.2f' % dic.pop('newPrice'))
-                                dic['open_interest'] = float('%.2f' % dic.pop('amount'))
-                                dic['volume'] = float('%.2f' % dic.pop('volume'))
-
-                                dic['b1_p'] = float('%.2f' % dic.pop('buyPrice1'))
-                                dic['b2_p'] = float('%.2f' % dic.pop('buyPrice2'))
-                                dic['b3_p'] = float('%.2f' % dic.pop('buyPrice3'))
-                                dic['b4_p'] = float('%.2f' % dic.pop('buyPrice4'))
-                                dic['b5_p'] = float('%.2f' % dic.pop('buyPrice5'))
-                                dic['b1_v'] = float('%.2f' % dic.pop('buyVolume1'))
-                                dic['b2_v'] = float('%.2f' % dic.pop('buyVolume2'))
-                                dic['b3_v'] = float('%.2f' % dic.pop('buyVolume3'))
-                                dic['b4_v'] = float('%.2f' % dic.pop('buyVolume4'))
-                                dic['b5_v'] = float('%.2f' % dic.pop('buyVolume5'))
-                                dic['a1_p'] = float('%.2f' % dic.pop('sellPrice1'))
-                                dic['a2_p'] = float('%.2f' % dic.pop('sellPrice2'))
-                                dic['a3_p'] = float('%.2f' % dic.pop('sellPrice3'))
-                                dic['a4_p'] = float('%.2f' % dic.pop('sellPrice4'))
-                                dic['a5_p'] = float('%.2f' % dic.pop('sellPrice5'))
-                                dic['a1_v'] = float('%.2f' % dic.pop('sellVolume1'))
-                                dic['a2_v'] = float('%.2f' % dic.pop('sellVolume2'))
-                                dic['a3_v'] = float('%.2f' % dic.pop('sellVolume3'))
-                                dic['a4_v'] = float('%.2f' % dic.pop('sellVolume4'))
-                                dic['a5_v'] = float('%.2f' % dic.pop('sellVolume5'))
-                                message = '{"table":"' + self._channel +\
-                                     '","data":' + json.dumps(dic) + '}'
-                                print(message)
-                                self._server.send_message(self._client, message)
-                                time.sleep(1)
+                            if label == self._symbol:
+                                self.send_report(report)
+                                time.sleep(0.01)
+            elif self._mode is Mode.live:
+                print("Live mode active, receiving messages")
+                self._amqp_channel.start_consuming()
             else:
                 print("Unsupported mode {}, quit".format(self._mode))
         except Exception as e:
@@ -189,6 +235,7 @@ class TickServer(WebsocketServer):
 PORT = 9002
 #MODE = Mode.dataframe
 MODE = Mode.protobuf
+#MODE = Mode.live
 DIRECTORY = os.path.split(os.path.realpath(__file__))[0]
 DF_FILE = DIRECTORY + '/data/600226_2019_08_13_2019_08_23_tick.csv'
 PR_FILE = DIRECTORY + '/data/rcv_data_20190910_sample'
