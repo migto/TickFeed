@@ -1,6 +1,6 @@
 # Python
 *.pyc
-*/_pycache__
+__pycache__/
 
 # Jupyter
 .ipynb_checkpoints
