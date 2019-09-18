@@ -8,15 +8,17 @@ import time
 import os
 import sys
 import base64
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from enum import unique
+import requests
 import pika
 import pandas as pd
 from google.protobuf.json_format import MessageToDict
-from google.protobuf.json_format import MessageToJson
 from lib.websocket_server import WebsocketServer
 from lib.rcvdata_pb2 import RcvData
+from dataclasses_json import dataclass_json
 
 MQ_CONFIG = {
     "host": "192.168.91.130",
@@ -27,6 +29,25 @@ MQ_CONFIG = {
     "exchange": "amq.fanout",
     "routingkey": "queue"
 }
+
+TRADE_URL = "http://192.168.91.130:8888"
+
+@dataclass_json
+@dataclass
+class Order:
+    symbol: str
+    oid: str
+    otype: str
+    op: str  # BUY SELL
+    price: float
+    volume: int
+    traded: int
+    status: str
+    last_fill_qty: int = 0
+    def is_active(self):
+        if self.status not in {"全部成交","全部撤单","部分成交"}:
+            return True
+        return False
 
 @unique
 class Mode(Enum):
@@ -63,17 +84,19 @@ class StoppableThread(threading.Thread):
         self._amqp_channel = None
         self._amqp_connection = None
         if self._mode is Mode.live:
-            self._amqp_credentials = pika.PlainCredentials(MQ_CONFIG.get("user"), MQ_CONFIG.get("passwd"))
-            self._amqp_parameters = pika.ConnectionParameters(MQ_CONFIG.get("host"), MQ_CONFIG.get("port"),\
-                                           MQ_CONFIG.get("vhost"), self._amqp_credentials)
+            self._amqp_credentials = pika.PlainCredentials(\
+                MQ_CONFIG.get("user"), MQ_CONFIG.get("passwd"))
+            self._amqp_parameters = pika.ConnectionParameters(\
+                MQ_CONFIG.get("host"), MQ_CONFIG.get("port"),\
+                MQ_CONFIG.get("vhost"), self._amqp_credentials)
             self._amqp_connection = pika.BlockingConnection(self._amqp_parameters)
             self._amqp_channel = self._amqp_connection.channel()
             result = self._amqp_channel.queue_declare(queue='', exclusive=True)
-            self._amqp_channel.queue_bind(exchange=MQ_CONFIG.get("exchange"),
+            self._amqp_channel.queue_bind(exchange=MQ_CONFIG.get("exchange"),\
                        queue=result.method.queue)
             self._amqp_channel.basic_consume(queue=result.method.queue,
-                                        auto_ack=True,
-                                        on_message_callback=self.callback)
+                                             auto_ack=True,
+                                             on_message_callback=self.callback)
 
     def send_report(self, report):
         """This method sends out the report structure to vnpy trader
@@ -115,7 +138,7 @@ class StoppableThread(threading.Thread):
         dic['a5_v'] = float('%.2f' % dic.pop('sellVolume5'))
         message = '{"table":"' + self._channel +\
              '","data":' + json.dumps(dic) + '}'
-        print(message)
+        #print(message)
         self._server.send_message(self._client, message)
 
     def callback(self, ch, method, proerties, body):
@@ -144,7 +167,7 @@ class StoppableThread(threading.Thread):
                             time.sleep(1)
                             message = '{"table":"' + self._channel +\
                                  '","data":' + row.to_json() + '}'
-                            print(message)
+                            #print(message)
                             self._server.send_message(self._client, message)
                             if self.stopped():
                                 print("Thread has been stopped, quit")
@@ -167,7 +190,7 @@ class StoppableThread(threading.Thread):
                             label = report.label.decode('gbk')
                             if label == self._symbol:
                                 self.send_report(report)
-                                time.sleep(0.01)
+                                time.sleep(TICK)
             elif self._mode is Mode.live:
                 print("Live mode active, receiving messages")
                 self._amqp_channel.start_consuming()
@@ -195,6 +218,48 @@ class TickServer(WebsocketServer):
         WebsocketServer.__init__(self, port, host, loglevel)
         self._subscribed_clients = {}
         self._client_thread_map = {}
+        self._orders = {}
+        self._thread = threading.Thread(target=self._run)
+        self._active = True
+        self._thread.start()
+
+    def _push_order(self, order: Order):
+        """Push order info to vnpy
+        """
+        if len(self.clients) == 0:
+            return
+        client = self.clients[0]
+        message = '{"table":"order", "data":' + order.to_json() + '}'
+        self.send_message(client, message)
+
+    def _run(self):
+        """This method periodically gets the open order status from tradeAPI
+        and send websocket updates to vnpy
+        """
+        try:
+            while self._active:
+                response = requests.get(TRADE_URL + "/api/v1.0/orders")
+                content = json.loads(response.text)
+                od_lst = content['dataTable']['rows']
+                for od in od_lst:
+                    cur_order = Order(od[1], # symbol
+                                      od[11], # oid
+                                      od[9], # otype
+                                      od[3], # op
+                                      float(od[8]), # price
+                                      int(od[5]), # volume
+                                      int(od[6]), # traded
+                                      od[4], # status
+                                      )
+                    last_order = self._orders.get(od[11], None)
+                    self._orders[od[11]] = cur_order
+                    if last_order and last_order.is_active():
+                        cur_order.last_fill_qty = cur_order.traded - last_order.traded
+                        self._push_order(cur_order)
+                time.sleep(2)
+        except Exception as err:
+            print(err)
+            print("Order update error, quit")
 
     def new_client(self, client, server):
         """Called for every client connecting
@@ -233,12 +298,13 @@ class TickServer(WebsocketServer):
                     self._client_thread_map[client['id']] = tick_thread
 
 PORT = 9002
+TICK = 0.5
 #MODE = Mode.dataframe
 MODE = Mode.protobuf
 #MODE = Mode.live
 DIRECTORY = os.path.split(os.path.realpath(__file__))[0]
 DF_FILE = DIRECTORY + '/data/600226_2019_08_13_2019_08_23_tick.csv'
-PR_FILE = DIRECTORY + '/data/rcv_data_20190910_sample'
+PR_FILE = DIRECTORY + '/data/rcv_data_20190911'
 TFILE = DF_FILE
 if MODE is Mode.protobuf:
     TFILE = PR_FILE
