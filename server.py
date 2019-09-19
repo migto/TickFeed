@@ -8,6 +8,8 @@ import time
 import os
 import sys
 import base64
+import signal
+import copy
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -19,6 +21,16 @@ from google.protobuf.json_format import MessageToDict
 from lib.websocket_server import WebsocketServer
 from lib.rcvdata_pb2 import RcvData
 from dataclasses_json import dataclass_json
+
+@unique
+class Mode(Enum):
+    """This class defines the server modes:
+    dataframe: using csv text file
+    protobuf: using proto3 bin file
+    live: using rabbitmq"""
+    dataframe = 1
+    protobuf = 2
+    live = 3
 
 MQ_CONFIG = {
     "host": "192.168.91.130",
@@ -32,32 +44,36 @@ MQ_CONFIG = {
 
 TRADE_URL = "http://192.168.91.130:8888"
 
+PORT = 9002
+TICK = 0.5
+#MODE = Mode.dataframe
+MODE = Mode.protobuf
+#MODE = Mode.live
+DIRECTORY = os.path.split(os.path.realpath(__file__))[0]
+DF_FILE = DIRECTORY + '/data/600226_2019_08_13_2019_08_23_tick.csv'
+PR_FILE = DIRECTORY + '/data/rcv_data_20190919'
+TFILE = DF_FILE
+if MODE is Mode.protobuf:
+    TFILE = PR_FILE
+
 @dataclass_json
 @dataclass
 class Order:
     symbol: str
     oid: str
     otype: str
-    op: str  # BUY SELL
+    op: str
     price: float
     volume: int
     traded: int
     status: str
+    time: str
     last_fill_qty: int = 0
+    avr_fill_price: float = 0
     def is_active(self):
         if self.status not in {"全部成交","全部撤单","部分成交"}:
             return True
         return False
-
-@unique
-class Mode(Enum):
-    """This class defines the server modes:
-    dataframe: using csv text file
-    protobuf: using proto3 bin file
-    live: using rabbitmq"""
-    dataframe = 1
-    protobuf = 2
-    live = 3
 
 class StoppableThread(threading.Thread):
     """This class is invoked when a vnpy trader gateway
@@ -101,45 +117,48 @@ class StoppableThread(threading.Thread):
     def send_report(self, report):
         """This method sends out the report structure to vnpy trader
         do the format transform thing"""
-        dic = MessageToDict(report)
-        dic['symbol'] = base64.b64decode(dic['label'])\
-                             .decode('gbk')
-        dic['name'] = base64.b64decode(dic['name'])\
-                            .decode('gbk')
-        dic['time'] = datetime.fromtimestamp(dic['time'])\
-                              .strftime("%Y-%m-%d %H:%M:%S")
-        dic['pre_close'] = float('%.2f' % dic.pop('lastClose'))
-        dic['open_price'] = float('%.2f' % dic.pop('open'))
-        dic['high_price'] = float('%.2f' % dic.pop('high'))
-        dic['low_price'] = float('%.2f' % dic.pop('low'))
-        dic['last_price'] = float('%.2f' % dic.pop('newPrice'))
-        dic['open_interest'] = float('%.2f' % dic.pop('amount'))
-        dic['volume'] = float('%.2f' % dic.pop('volume'))
+        message="report"
+        try:
+            dic = {}
+            dic['symbol'] = report.label.decode('gbk')
+            dic['name'] = report.name.decode('gbk')
+            dic['time'] = datetime.fromtimestamp(report.time)\
+                                  .strftime("%Y-%m-%d %H:%M:%S")
+            dic['pre_close'] = float('%.2f' % report.last_close)
+            dic['open_price'] = float('%.2f' % report.open)
+            dic['high_price'] = float('%.2f' % report.high)
+            dic['low_price'] = float('%.2f' % report.low)
+            dic['last_price'] = float('%.2f' % report.new_price)
+            dic['open_interest'] = float('%.2f' % report.amount)
+            dic['volume'] = float('%.2f' % report.volume)
 
-        dic['b1_p'] = float('%.2f' % dic.pop('buyPrice1'))
-        dic['b2_p'] = float('%.2f' % dic.pop('buyPrice2'))
-        dic['b3_p'] = float('%.2f' % dic.pop('buyPrice3'))
-        dic['b4_p'] = float('%.2f' % dic.pop('buyPrice4'))
-        dic['b5_p'] = float('%.2f' % dic.pop('buyPrice5'))
-        dic['b1_v'] = float('%.2f' % dic.pop('buyVolume1'))
-        dic['b2_v'] = float('%.2f' % dic.pop('buyVolume2'))
-        dic['b3_v'] = float('%.2f' % dic.pop('buyVolume3'))
-        dic['b4_v'] = float('%.2f' % dic.pop('buyVolume4'))
-        dic['b5_v'] = float('%.2f' % dic.pop('buyVolume5'))
-        dic['a1_p'] = float('%.2f' % dic.pop('sellPrice1'))
-        dic['a2_p'] = float('%.2f' % dic.pop('sellPrice2'))
-        dic['a3_p'] = float('%.2f' % dic.pop('sellPrice3'))
-        dic['a4_p'] = float('%.2f' % dic.pop('sellPrice4'))
-        dic['a5_p'] = float('%.2f' % dic.pop('sellPrice5'))
-        dic['a1_v'] = float('%.2f' % dic.pop('sellVolume1'))
-        dic['a2_v'] = float('%.2f' % dic.pop('sellVolume2'))
-        dic['a3_v'] = float('%.2f' % dic.pop('sellVolume3'))
-        dic['a4_v'] = float('%.2f' % dic.pop('sellVolume4'))
-        dic['a5_v'] = float('%.2f' % dic.pop('sellVolume5'))
-        message = '{"table":"' + self._channel +\
-             '","data":' + json.dumps(dic) + '}'
-        #print(message)
-        self._server.send_message(self._client, message)
+            dic['b1_p'] = float('%.2f' % report.buy_price_1)
+            dic['b2_p'] = float('%.2f' % report.buy_price_2)
+            dic['b3_p'] = float('%.2f' % report.buy_price_3)
+            dic['b4_p'] = float('%.2f' % report.buy_price_4)
+            dic['b5_p'] = float('%.2f' % report.buy_price_5)
+            dic['b1_v'] = float('%.2f' % report.buy_volume_1)
+            dic['b2_v'] = float('%.2f' % report.buy_volume_2)
+            dic['b3_v'] = float('%.2f' % report.buy_volume_3)
+            dic['b4_v'] = float('%.2f' % report.buy_volume_4)
+            dic['b5_v'] = float('%.2f' % report.buy_volume_5)
+            dic['a1_p'] = float('%.2f' % report.sell_price_1)
+            dic['a2_p'] = float('%.2f' % report.sell_price_2)
+            dic['a3_p'] = float('%.2f' % report.sell_price_3)
+            dic['a4_p'] = float('%.2f' % report.sell_price_4)
+            dic['a5_p'] = float('%.2f' % report.sell_price_5)
+            dic['a1_v'] = float('%.2f' % report.sell_volume_1)
+            dic['a2_v'] = float('%.2f' % report.sell_volume_2)
+            dic['a3_v'] = float('%.2f' % report.sell_volume_3)
+            dic['a4_v'] = float('%.2f' % report.sell_volume_4)
+            dic['a5_v'] = float('%.2f' % report.sell_volume_5)
+            message = '{"table":"' + self._channel +\
+                 '","data":' + json.dumps(dic) + '}'
+            self._server.send_message(self._client, message)
+        except Exception as err:
+            print(message)
+            print(err)
+            #self.stop()
 
     def callback(self, ch, method, proerties, body):
         """This method is the amqp consuming callback method
@@ -170,7 +189,7 @@ class StoppableThread(threading.Thread):
                             #print(message)
                             self._server.send_message(self._client, message)
                             if self.stopped():
-                                print("Thread has been stopped, quit")
+                                print("Thread for channel {} has been stopped, quit".format(self._channel))
                                 return
                     except StopIteration:
                         loop = False
@@ -186,6 +205,9 @@ class StoppableThread(threading.Thread):
                                                     sys.byteorder)
                         msg_data = rcv_file.read(msg_length)
                         self._rcv_data.ParseFromString(msg_data)
+                        if self.stopped():
+                            print("Thread for channel {} has been stopped, quit".format(self._channel))
+                            return
                         for report in self._rcv_data.lstReport:
                             label = report.label.decode('gbk')
                             if label == self._symbol:
@@ -199,6 +221,7 @@ class StoppableThread(threading.Thread):
         except Exception as e:
             print(e)
             print("Tick feed exception, quit")
+            self.stop()
 
     def stop(self):
         """Set the stop event
@@ -216,8 +239,8 @@ class TickServer(WebsocketServer):
     """
     def __init__(self, port, host='127.0.0.1', loglevel=logging.WARNING):
         WebsocketServer.__init__(self, port, host, loglevel)
-        self._subscribed_clients = {}
-        self._client_thread_map = {}
+        self._subscribed_channels = {}
+        self._started_threads = {}
         self._orders = {}
         self._thread = threading.Thread(target=self._run)
         self._active = True
@@ -250,11 +273,13 @@ class TickServer(WebsocketServer):
                                       int(od[5]), # volume
                                       int(od[6]), # traded
                                       od[4], # status
+                                      od[0], # time
                                       )
                     last_order = self._orders.get(od[11], None)
                     self._orders[od[11]] = cur_order
                     if last_order and last_order.is_active():
                         cur_order.last_fill_qty = cur_order.traded - last_order.traded
+                        cur_order.avr_fill_price = float(od[10])
                         self._push_order(cur_order)
                 time.sleep(2)
         except Exception as err:
@@ -270,6 +295,18 @@ class TickServer(WebsocketServer):
     def client_left(self, client, server):
         """Called for every client disconnecting
         """
+        channel_set = self._subscribed_channels.pop(client['id'], None)
+        if not channel_set:
+            print("Client(%d) does not subscribe to any channel" % client['id'])
+        else:
+            print("Client(%d)'s channel subscribtion cancelled" % client['id'])
+        thread_set = self._started_threads.pop(client['id'], None)
+        if not thread_set:
+            print("Client(%d) does not start any threads" % client['id'])
+        else:
+            for thread in thread_set:
+                thread.stop()
+            print("Client(%d)'s threads stopped" % client['id'])
         print("Client(%d) disconnected" % client['id'])
 
     def message_received(self, client, server, message):
@@ -278,12 +315,15 @@ class TickServer(WebsocketServer):
         data = json.loads(message)
         if data["op"] == "subscribe":
             channels = data["args"]
+            channel_set = self._subscribed_channels.get(client['id'],set())
+            if not channel_set:
+                self._subscribed_channels[client['id']] = channel_set
             for channel in channels:
-                if channel == self._subscribed_clients.get(client['id'],
-                                                           None):
+                if channel in channel_set:
+                    print("Client{} already subscribed for channel {}".format(client['id'],channel))
                     # already subscribed
                     return
-
+                # one thread for each subscription
                 lst = channel.split("-")
                 if lst[0] == "ticker":
                     tick_thread = StoppableThread(MODE,
@@ -294,19 +334,16 @@ class TickServer(WebsocketServer):
                     tick_thread.start()
                     print("Client({}) subscribe for {}"\
                         .format(client['id'], channel))
-                    self._subscribed_clients[client['id']] = channel
-                    self._client_thread_map[client['id']] = tick_thread
+                    channel_set.add(channel)
+                    print("Client({}) subscription list:{}".format(client['id'], channel_set))
+                    thread_set = self._started_threads.get(client['id'], set())
+                    if not thread_set:
+                        self._started_threads[client['id']] = thread_set
+                    thread_set.add(tick_thread)
 
-PORT = 9002
-TICK = 0.5
-#MODE = Mode.dataframe
-MODE = Mode.protobuf
-#MODE = Mode.live
-DIRECTORY = os.path.split(os.path.realpath(__file__))[0]
-DF_FILE = DIRECTORY + '/data/600226_2019_08_13_2019_08_23_tick.csv'
-PR_FILE = DIRECTORY + '/data/rcv_data_20190911'
-TFILE = DF_FILE
-if MODE is Mode.protobuf:
-    TFILE = PR_FILE
-SERVER = TickServer(PORT)
-SERVER.run_forever()
+def main():
+    SERVER = TickServer(PORT)
+    SERVER.run_forever()
+
+if __name__ == '__main__':
+    main()
