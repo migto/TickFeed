@@ -47,11 +47,11 @@ TRADE_URL = "http://192.168.91.130:8888"
 PORT = 9002
 TICK = 0.5
 #MODE = Mode.dataframe
-MODE = Mode.protobuf
-#MODE = Mode.live
+#MODE = Mode.protobuf
+MODE = Mode.live
 DIRECTORY = os.path.split(os.path.realpath(__file__))[0]
 DF_FILE = DIRECTORY + '/data/600226_2019_08_13_2019_08_23_tick.csv'
-PR_FILE = DIRECTORY + '/data/rcv_data_20190919'
+PR_FILE = DIRECTORY + '/data/rcv_data_20190911'
 TFILE = DF_FILE
 if MODE is Mode.protobuf:
     TFILE = PR_FILE
@@ -71,7 +71,7 @@ class Order:
     last_fill_qty: int = 0
     avr_fill_price: float = 0
     def is_active(self):
-        if self.status not in {"全部成交","全部撤单","部分成交"}:
+        if self.status not in {"全部成交","全部撤单"}:
             return True
         return False
 
@@ -155,6 +155,10 @@ class StoppableThread(threading.Thread):
             message = '{"table":"' + self._channel +\
                  '","data":' + json.dumps(dic) + '}'
             self._server.send_message(self._client, message)
+        except IOError as err:
+            print(message)
+            print(err)
+            self.stop()
         except Exception as err:
             print(message)
             print(err)
