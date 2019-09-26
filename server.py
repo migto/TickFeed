@@ -45,12 +45,13 @@ MQ_CONFIG = {
 TRADE_URL = "http://192.168.91.130:8888"
 
 PORT = 9002
-TICK = 0.5
-#MODE = Mode.dataframe
+TICK = 0.2
+MODE = Mode.dataframe
 #MODE = Mode.protobuf
-MODE = Mode.live
+#MODE = Mode.live
 DIRECTORY = os.path.split(os.path.realpath(__file__))[0]
-DF_FILE = DIRECTORY + '/data/600226_2019_08_13_2019_08_23_tick.csv'
+#DF_FILE = DIRECTORY + '/data/600226_2019_08_13_2019_08_23_tick.csv'
+DF_FILE = DIRECTORY + '/data/600226_0408_14.csv'
 PR_FILE = DIRECTORY + '/data/rcv_data_20190911'
 TFILE = DF_FILE
 if MODE is Mode.protobuf:
@@ -185,9 +186,31 @@ class StoppableThread(threading.Thread):
                         chunk = reader.get_chunk(self._chunk_size)
                         chunk = chunk.drop("Unnamed: 0", axis=1)
                         chunk['symbol'] = '600226'
+                        chunk['name'] = '瀚叶股份'
+
+                        chunk.rename(columns={'datetime':'time',
+                                              'open':'open_price',
+                                              'last':'last_price',
+                                              'high':'high_price',
+                                              'low':'low_price',
+                                              'prev_close':'pre_close',
+                                              'total_turnover':'open_interest',
+                                              'a1':'a1_p',
+                                              'a2':'a2_p',
+                                              'a3':'a3_p',
+                                              'a4':'a4_p',
+                                              'a5':'a5_p',
+                                              'b1':'b1_p',
+                                              'b2':'b2_p',
+                                              'b3':'b3_p',
+                                              'b4':'b4_p',
+                                              'b5':'b5_p'
+                                              },
+                                     inplace=True)
 
                         for index, row in chunk.iterrows():
-                            time.sleep(1)
+                            time.sleep(TICK)
+                            row['time'] = row['time'][:-4]
                             message = '{"table":"' + self._channel +\
                                  '","data":' + row.to_json() + '}'
                             #print(message)
